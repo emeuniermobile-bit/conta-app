@@ -77,11 +77,13 @@ Tout se fait depuis un PC Windows ou Linux : pas besoin de Mac.
    supabase functions deploy push-dispatch --no-verify-jwt
    ```
 
-3. Dans *SQL Editor*, enregistrer les deux secrets utilisés par l'envoi des notifications :
+3. Inventer un mot de passe pour la fonction d'envoi des notifications, puis :
+   - dans *Edge Functions → Secrets*, ajouter `PUSH_DISPATCH_SECRET` avec ce mot de passe ;
+   - dans *SQL Editor*, enregistrer l'adresse du projet et ce même mot de passe :
 
    ```sql
    select vault.create_secret('https://<ref>.supabase.co', 'project_url');
-   select vault.create_secret('<clé service_role>', 'service_role_key');
+   select vault.create_secret('<mot de passe inventé>', 'push_dispatch_secret');
    ```
 
 4. Dans *Authentication → Sign In / Providers → Phone* : activer le téléphone et brancher un fournisseur de SMS

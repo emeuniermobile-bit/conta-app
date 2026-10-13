@@ -2,8 +2,9 @@
 // service de notifications d'Expo, qui relaie vers Apple (APNs) et Google (FCM).
 // Appelée chaque minute par pg_cron (voir migration *_schedule.sql).
 //
-// Secret facultatif (supabase secrets set ...) :
-//   EXPO_ACCESS_TOKEN  si la « sécurité renforcée des notifications » est activée sur expo.dev
+// Secrets (Edge Functions → Secrets dans le tableau de bord, ou `supabase secrets set`) :
+//   PUSH_DISPATCH_SECRET  mot de passe partagé avec la tâche pg_cron (secret Vault du même nom)
+//   EXPO_ACCESS_TOKEN     facultatif, si la « sécurité renforcée des notifications » est activée sur expo.dev
 import { createClient } from "jsr:@supabase/supabase-js@2";
 
 const BATCH_SIZE = 500;
@@ -78,8 +79,9 @@ async function sendChunk(chunk: Pending[]): Promise<(string | null)[]> {
 }
 
 Deno.serve(async (req) => {
+  // Seule la tâche planifiée connaît ce mot de passe.
   const auth = req.headers.get("authorization") ?? "";
-  if (auth !== `Bearer ${env("SUPABASE_SERVICE_ROLE_KEY")}`) {
+  if (auth !== `Bearer ${env("PUSH_DISPATCH_SECRET")}`) {
     return new Response("forbidden", { status: 403 });
   }
 
