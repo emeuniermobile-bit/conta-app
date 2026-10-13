@@ -1,21 +1,28 @@
-// Envoie les notifications en attente (table public.notifications) via APNs.
+// Envoie les notifications en attente (table public.notifications) via le
+// service de notifications d'Expo, qui relaie vers Apple (APNs) et Google (FCM).
 // Appelée chaque minute par pg_cron (voir migration *_schedule.sql).
 //
-// Secrets (supabase secrets set ...) :
-//   APNS_KEY_ID, APNS_TEAM_ID, APNS_BUNDLE_ID,
-//   APNS_PRIVATE_KEY  (contenu du fichier .p8, BEGIN/END compris)
+// Secret facultatif (supabase secrets set ...) :
+//   EXPO_ACCESS_TOKEN  si la « sécurité renforcée des notifications » est activée sur expo.dev
 import { createClient } from "jsr:@supabase/supabase-js@2";
 
-const BATCH_SIZE = 200;
+const BATCH_SIZE = 500;
+const EXPO_PUSH_URL = "https://exp.host/--/api/v2/push/send";
+const EXPO_CHUNK = 100; // maximum de messages par requête Expo
 
 type Pending = {
   id: number;
   kind: string;
   title: string;
   body: string;
-  apns_token: string | null;
-  apns_sandbox: boolean;
+  push_token: string | null;
   state: "survivor" | "incubating" | "zombie";
+};
+
+type Ticket = { status: "ok"; id: string } | {
+  status: "error";
+  message: string;
+  details?: { error?: string };
 };
 
 const env = (name: string) => {
@@ -28,81 +35,46 @@ const supabase = createClient(env("SUPABASE_URL"), env("SUPABASE_SERVICE_ROLE_KE
   auth: { persistSession: false },
 });
 
-// --- Jeton d'authentification APNs (ES256, valable 1 h, renouvelé toutes les 50 min) ---
-
-let cachedJwt: { token: string; issuedAt: number } | null = null;
-
-const base64url = (data: ArrayBuffer | Uint8Array | string) => {
-  const bytes = typeof data === "string" ? new TextEncoder().encode(data) : new Uint8Array(data);
-  let binary = "";
-  for (const b of bytes) binary += String.fromCharCode(b);
-  return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
-};
-
-async function apnsJwt(): Promise<string> {
-  const now = Math.floor(Date.now() / 1000);
-  if (cachedJwt && now - cachedJwt.issuedAt < 50 * 60) return cachedJwt.token;
-
-  const pem = env("APNS_PRIVATE_KEY").replace(/\\n/g, "\n");
-  const der = Uint8Array.from(
-    atob(pem.replace(/-----[A-Z ]+-----/g, "").replace(/\s+/g, "")),
-    (c) => c.charCodeAt(0),
-  );
-  const key = await crypto.subtle.importKey(
-    "pkcs8",
-    der,
-    { name: "ECDSA", namedCurve: "P-256" },
-    false,
-    ["sign"],
-  );
-  const header = base64url(JSON.stringify({ alg: "ES256", kid: env("APNS_KEY_ID") }));
-  const claims = base64url(JSON.stringify({ iss: env("APNS_TEAM_ID"), iat: now }));
-  const signature = await crypto.subtle.sign(
-    { name: "ECDSA", hash: "SHA-256" },
-    key,
-    new TextEncoder().encode(`${header}.${claims}`),
-  );
-  const token = `${header}.${claims}.${base64url(signature)}`;
-  cachedJwt = { token, issuedAt: now };
-  return token;
-}
-
-// --- Envoi ---
-
 // Les alertes de contamination doivent percer le mode concentration.
 const TIME_SENSITIVE = new Set(["infected", "incubation_warning", "transformed"]);
 
-async function send(n: Pending): Promise<string | null> {
-  if (!n.apns_token) return "no_token";
+function toMessage(n: Pending) {
+  return {
+    to: n.push_token,
+    title: n.title,
+    body: n.body,
+    sound: "default",
+    priority: "high",
+    interruptionLevel: TIME_SENSITIVE.has(n.kind) ? "time-sensitive" : "active",
+    channelId: "alerts",
+    data: { kind: n.kind },
+  };
+}
 
-  const host = n.apns_sandbox ? "api.sandbox.push.apple.com" : "api.push.apple.com";
-  const response = await fetch(`https://${host}/3/device/${n.apns_token}`, {
+async function sendChunk(chunk: Pending[]): Promise<(string | null)[]> {
+  const headers: Record<string, string> = {
+    "content-type": "application/json",
+    accept: "application/json",
+  };
+  const accessToken = Deno.env.get("EXPO_ACCESS_TOKEN");
+  if (accessToken) headers.authorization = `Bearer ${accessToken}`;
+
+  const response = await fetch(EXPO_PUSH_URL, {
     method: "POST",
-    headers: {
-      authorization: `bearer ${await apnsJwt()}`,
-      "apns-topic": env("APNS_BUNDLE_ID"),
-      "apns-push-type": "alert",
-      "apns-priority": "10",
-      "apns-collapse-id": `${n.kind}-${n.id}`,
-    },
-    body: JSON.stringify({
-      aps: {
-        alert: { title: n.title, body: n.body },
-        sound: n.state === "zombie" ? "zombie.caf" : "alert.caf",
-        "interruption-level": TIME_SENSITIVE.has(n.kind) ? "time-sensitive" : "active",
-        "thread-id": n.kind,
-      },
-      kind: n.kind,
-    }),
+    headers,
+    body: JSON.stringify(chunk.map(toMessage)),
   });
-  if (response.ok) return null;
-
-  const reason = (await response.json().catch(() => ({})))?.reason ?? `http_${response.status}`;
-  // Jeton périmé (appli supprimée, réinstallée...) : on l'oublie.
-  if (response.status === 410 || reason === "BadDeviceToken" || reason === "Unregistered") {
-    await supabase.from("profiles").update({ apns_token: null }).eq("apns_token", n.apns_token);
+  if (!response.ok) {
+    const failure = `http_${response.status}`;
+    return chunk.map(() => failure);
   }
-  return reason;
+  const { data } = (await response.json()) as { data: Ticket[] };
+  return chunk.map((_n, i) => {
+    const ticket = data?.[i];
+    if (!ticket) return "no_ticket";
+    if (ticket.status === "ok") return null;
+    return ticket.details?.error ?? ticket.message;
+  });
 }
 
 Deno.serve(async (req) => {
@@ -116,19 +88,29 @@ Deno.serve(async (req) => {
   if (error) return Response.json({ error: error.message }, { status: 500 });
 
   const pending = (data ?? []) as Pending[];
-  const results = await Promise.all(pending.map(async (n) => {
-    let failure: string | null;
-    try {
-      failure = await send(n);
-    } catch (e) {
-      failure = e instanceof Error ? e.message : String(e);
-    }
-    if (failure) await supabase.from("notifications").update({ error: failure }).eq("id", n.id);
-    return failure;
-  }));
+  const withToken = pending.filter((n) => n.push_token);
+  let failed = 0;
 
-  return Response.json({
-    processed: results.length,
-    failed: results.filter((r) => r !== null && r !== "no_token").length,
-  });
+  for (let i = 0; i < withToken.length; i += EXPO_CHUNK) {
+    const chunk = withToken.slice(i, i + EXPO_CHUNK);
+    let results: (string | null)[];
+    try {
+      results = await sendChunk(chunk);
+    } catch (e) {
+      const failure = e instanceof Error ? e.message : String(e);
+      results = chunk.map(() => failure);
+    }
+    await Promise.all(chunk.map(async (n, j) => {
+      const failure = results[j];
+      if (!failure) return;
+      failed++;
+      await supabase.from("notifications").update({ error: failure }).eq("id", n.id);
+      // Appli désinstallée ou notifications refusées : on oublie le jeton.
+      if (failure === "DeviceNotRegistered") {
+        await supabase.from("profiles").update({ push_token: null }).eq("push_token", n.push_token);
+      }
+    }));
+  }
+
+  return Response.json({ processed: pending.length, sent: withToken.length - failed, failed });
 });

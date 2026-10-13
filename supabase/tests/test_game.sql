@@ -294,5 +294,14 @@ select pg_temp.check((select status from public.seasons where id = :old_season) 
 
 -- ---------------------------------------------------------------------------
 \echo '  réservation des notifications'
+select pg_temp.login((select id from t where name = 'alice'));
+select public.register_device('ExponentPushToken[abc]', true);
+select pg_temp.login((select id from t where name = 'bob'));
+select public.register_device('ExponentPushToken[abc]');
+select pg_temp.check((select count(*) from public.profiles where push_token = 'ExponentPushToken[abc]') = 1,
+                     'un jeton appartient à un seul compte');
+select public.register_device(null, false);
+select pg_temp.check((select push_token from public.profiles where id = auth.uid()) = 'ExponentPushToken[abc]',
+                     'mettre à jour la localisation ne perd pas le jeton');
 select pg_temp.check((select count(*) from public.claim_notifications(1000)) > 0, 'lot réservé');
 select pg_temp.check((select count(*) from public.claim_notifications(1000)) = 0, 'jamais envoyées deux fois');

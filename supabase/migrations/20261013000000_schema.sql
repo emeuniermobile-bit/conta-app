@@ -133,8 +133,7 @@ create table public.profiles (
   last_seen_at         timestamptz not null default now(),
   last_arrondissement  smallint references public.arrondissements (code),
   background_location  boolean not null default false,
-  apns_token           text,
-  apns_sandbox         boolean not null default false,
+  push_token           text,  -- jeton Expo (ExponentPushToken[...])
   -- Compteurs de la saison en cours
   contaminations       integer not null default 0,
   cures                integer not null default 0,
@@ -312,7 +311,7 @@ $$;
 -- clé service_role). Deux envois simultanés ne prennent jamais la même ligne.
 create or replace function public.claim_notifications(p_limit integer default 200)
 returns table (id bigint, kind text, title text, body text,
-               apns_token text, apns_sandbox boolean, state public.player_state)
+               push_token text, state public.player_state)
 language sql security definer set search_path = public, extensions as $$
   with claimed as (
     update public.notifications n set sent_at = now()
@@ -320,7 +319,7 @@ language sql security definer set search_path = public, extensions as $$
                      where sent_at is null order by created_at
                      limit p_limit for update skip locked)
     returning n.id, n.user_id, n.kind, n.title, n.body)
-  select c.id, c.kind, c.title, c.body, p.apns_token, p.apns_sandbox, p.state
+  select c.id, c.kind, c.title, c.body, p.push_token, p.state
     from claimed c join public.profiles p on p.id = c.user_id
 $$;
 
@@ -694,16 +693,15 @@ begin
    where id = p.id;
 end $$;
 
-create or replace function public.register_device(p_apns_token text, p_sandbox boolean default false,
+create or replace function public.register_device(p_push_token text default null,
                                                   p_background_location boolean default null)
 returns void language plpgsql security definer set search_path = public, extensions as $$
 declare p public.profiles := public.require_player();
 begin
   -- Un jeton appartient à un seul compte.
-  update public.profiles set apns_token = null where apns_token = p_apns_token and id <> p.id;
+  update public.profiles set push_token = null where push_token = p_push_token and id <> p.id;
   update public.profiles
-     set apns_token = coalesce(p_apns_token, apns_token),
-         apns_sandbox = p_sandbox,
+     set push_token = coalesce(p_push_token, push_token),
          background_location = coalesce(p_background_location, background_location)
    where id = p.id;
 end $$;
@@ -970,7 +968,7 @@ create policy "recipes readable" on public.recipes for select to authenticated u
 revoke execute on all functions in schema public from public, anon, authenticated;
 grant execute on function
   public.setup_profile(text, jsonb),
-  public.register_device(text, boolean, boolean),
+  public.register_device(text, boolean),
   public.report_location(double precision, double precision, double precision, timestamptz, timestamptz),
   public.claim_daily_ration(),
   public.craft(text, integer),
