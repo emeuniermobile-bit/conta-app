@@ -1,0 +1,11 @@
+.DS_Store
+# iOS
+ios/Contamination.xcodeproj/
+ios/Config/Secrets.xcconfig
+xcuserdata/
+DerivedData/
+*.p8
+# Supabase
+supabase/.branches/
+supabase/.temp/
+.env

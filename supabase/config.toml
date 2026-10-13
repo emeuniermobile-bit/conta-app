@@ -1,0 +1,39 @@
+# Configuration du projet pour la CLI Supabase (`supabase start`, `supabase db push`).
+project_id = "contamination"
+
+[api]
+schemas = ["public"]
+extra_search_path = ["public", "extensions"]
+
+[db]
+major_version = 15
+
+[auth]
+site_url = "http://localhost:3000"
+jwt_expiry = 3600
+enable_refresh_token_rotation = true
+
+# Un compte par numéro de téléphone : seule l'inscription par SMS est ouverte.
+[auth.email]
+enable_signup = false
+
+[auth.sms]
+enable_signup = true
+enable_confirmations = true
+template = "Contamination : ton code est {{ .Code }}"
+max_frequency = "60s"
+
+# En local, numéros de test sans envoi de SMS.
+[auth.sms.test_otp]
+33600000001 = "123456"
+33600000002 = "123456"
+
+# En production : configurer Twilio (ou autre) dans le tableau de bord.
+[auth.sms.twilio]
+enabled = false
+account_sid = ""
+message_service_sid = ""
+auth_token = "env(SUPABASE_AUTH_SMS_TWILIO_AUTH_TOKEN)"
+
+[functions.push-dispatch]
+verify_jwt = false
